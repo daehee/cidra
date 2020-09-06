@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"text/tabwriter"
@@ -99,9 +100,18 @@ func main() {
 
 		}
 
-		for k, v := range asns {
-			output <- fmt.Sprintf("%d\t%s\t%s\t%d", k, v.desc, v.cidr, v.GetCount())
+		// sort descending by ASN counts
+		p := make(ASNCountsList, len(asns))
+		i := 0
+		for asn, data := range asns {
+			p[i] = ASNCounts{asn, data.n}
+			i++
 		}
+		sort.Sort(sort.Reverse(p))
+		for _, k := range p {
+			output <- fmt.Sprintf("%d\t%s\t%s\t%d", k.Key, asns[k.Key].desc, asns[k.Key].cidr, asns[k.Key].GetCount())
+		}
+
 		ipWG.Done()
 	}()
 
