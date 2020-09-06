@@ -2,14 +2,14 @@ package main
 
 import (
 	"bufio"
-	"fmt"
+	"encoding/csv"
 	"log"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
-	"text/tabwriter"
 
 	"inet.af/netaddr"
 )
@@ -44,7 +44,7 @@ func main() {
 
 	// initialize channels
 	ips := make(chan string)
-	output := make(chan string)
+	output := make(chan []string)
 
 	// initialize map for atomic counter and metadata
 	asns := make(map[int]*asnData)
@@ -52,14 +52,17 @@ func main() {
 	var outputWG sync.WaitGroup
 	outputWG.Add(1)
 	go func() {
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.Debug)
+		w := csv.NewWriter(os.Stdout)
 
 		for o := range output {
-			_, err := fmt.Fprintln(w, o)
-			check(err)
+		    err := w.Write(o)
+		    check(err)
 		}
 
 		w.Flush()
+		err := w.Error()
+		check(err)
+
 		outputWG.Done()
 	}()
 
@@ -109,7 +112,7 @@ func main() {
 		}
 		sort.Sort(sort.Reverse(p))
 		for _, k := range p {
-			output <- fmt.Sprintf("%d\t%s\t%s\t%d", k.Key, asns[k.Key].desc, asns[k.Key].cidr, asns[k.Key].GetCount())
+		    output <- []string{strconv.Itoa(k.Key), asns[k.Key].desc, asns[k.Key].cidr, strconv.Itoa(asns[k.Key].GetCount())}
 		}
 
 		ipWG.Done()
