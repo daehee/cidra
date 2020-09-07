@@ -7,4 +7,4 @@ require (
 	inet.af/netaddr v0.0.0-20200810144936-56928fe48a98
 )
 
-replace github.com/bradfitz/ip2asn => github.com/daehee/ip2asn v0.0.0-20200906045629-669876cb1c94
+replace github.com/bradfitz/ip2asn => github.com/daehee/ip2asn v0.0.0-20200907082513-fe57ae578df3
