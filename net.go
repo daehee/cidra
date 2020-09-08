@@ -49,6 +49,9 @@ func (m *i2aMap) ipCIDR(ip *netaddr.IP) (string, int, error) {
 			continue
 		}
 	}
+	if cidr == "" {
+		return "", 0, errors.New("no matching CIDR")
+	}
 	return cidr, asn, nil
 }
 
