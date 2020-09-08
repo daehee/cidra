@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 
 	"github.com/bradfitz/ip2asn"
+	"inet.af/netaddr"
 )
 
 type i2aMap struct {
@@ -19,6 +21,35 @@ func (m *i2aMap) new() error {
 		return err
 	}
 	return nil
+}
+
+func (m *i2aMap) ipCIDR(ip *netaddr.IP) (string, int, error) {
+	// lookup ASN of IP address
+	asn := m.ASofIP(*ip)
+	// skip if invalid ASN returning 0 value
+	if asn == 0 {
+		return "", 0, errors.New("AS0")
+	}
+
+	// TODO optimize: first check if there's a match in cached map of ASNs to CIDRs before diving into more expensive operations
+
+	// lookup specific CIDR for this IP
+	// IP -> ASN -> CIDRs -> CIDR containing IP
+	var cidr string
+	ipRanges := m.ASRanges(asn)
+	for _, r := range ipRanges {
+		// skip if IPv6 since rangeCIDR function currently not compatible
+		if !IsIPv4(r.StartIP) || !IsIPv4(r.EndIP) {
+			continue
+		}
+		tmpNet := rangeCIDR(net.ParseIP(r.StartIP), net.ParseIP(r.EndIP))
+		// ASN has multiple ranges, so check which range this IP belongs to
+		if tmpNet.Contains(net.ParseIP(ip.String())) {
+			cidr = tmpNet.String()
+			continue
+		}
+	}
+	return cidr, asn, nil
 }
 
 // TODO improve accuracy with more granular multiple CIDR output

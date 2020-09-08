@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -27,17 +26,19 @@ func main() {
 	err = m.new()
 	check(err)
 
+	// initialize map for atomic counter and metadata
+	cidrs := make(map[string]*asnData)
+
 	// initialize channels
 	ipChan := make(chan string)
 	outChan := make(chan []string)
-
-	// initialize map for atomic counter and metadata
-	cidrs := make(map[string]*asnData)
 
 	var outWG sync.WaitGroup
 	outWG.Add(1)
 	go output(&outWG, outChan)
 
+	// TODO move sort to separate stage of pipeline
+	// TODO fan out heavy-load processing with multiple workers
 	var ipWG sync.WaitGroup
 	ipWG.Add(1)
 	go func() {
@@ -48,33 +49,10 @@ func main() {
 				continue
 			}
 
-			// lookup ASN of IP address
-			asn := m.ASofIP(ip)
-			// skip if invalid ASN returning 0 value
-			if asn == 0 {
+			// lookup CIDR and ASN number for this IP
+			cidr, asn, err := m.ipCIDR(&ip)
+			if err != nil {
 				continue
-			}
-
-			// TODO optimize: first check if there's a match in cached map of ASNs to CIDRs before diving into more expensive operations
-
-			// lookup specific CIDR for this IP
-			// IP -> ASN -> CIDRs -> CIDR containing IP
-			var cidr string
-			ipRanges := m.ASRanges(asn)
-			for _, r := range ipRanges {
-				// skip if IPv6 since rangeCIDR function currently not compatible
-				if !IsIPv4(r.StartIP) || !IsIPv4(r.EndIP) {
-					continue
-				}
-				tmpNet := rangeCIDR(net.ParseIP(r.StartIP), net.ParseIP(r.EndIP))
-				// ASN has multiple ranges, so check which range this IP belongs to
-				if tmpNet.Contains(net.ParseIP(ipStr)) {
-					cidr = tmpNet.String()
-					continue
-				}
-			}
-			if cidr == "" {
-				log.Fatalln("CIDR not found")
 			}
 
 			// increment counter if previously parsed and skip rest of metadata lookup & assignment operations
@@ -83,15 +61,13 @@ func main() {
 				continue
 			}
 
-			desc := m.ASName(asn)
-
+			// add new map entry for CIDR
 			cidrs[cidr] = &asnData{
 				asn:  asn,
-				desc: desc,
+				desc: m.ASName(asn),
 			}
 			// utilize atomic counter
 			cidrs[cidr].addCount()
-
 		}
 
 		// sort descending by CIDR counts
@@ -118,7 +94,6 @@ func main() {
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		ipStr := sc.Text()
-		// TODO validate and clean IP before sending into channel
 		ipChan <- ipStr
 	}
 	close(ipChan)
