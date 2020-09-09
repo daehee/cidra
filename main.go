@@ -2,101 +2,160 @@ package main
 
 import (
 	"bufio"
+	"encoding/csv"
 	"fmt"
 	"log"
 	"os"
-	"sort"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"inet.af/netaddr"
 )
 
-func check(err error) {
-	if err != nil {
-		log.Fatalln(err)
+var (
+	cpu = runtime.NumCPU()
+)
+
+func inGen(c chan<- string, done <-chan interface{}) {
+	defer close(c)
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		select {
+		case <-done:
+			return
+		case c <- sc.Text():
+		}
 	}
 }
 
-func main() {
-	var err error
+type result struct {
+	cidr string
+	asn  int
+	err  error
+}
 
-	var m i2aMap
-	// load ip2asn database
-	err = m.new()
-	check(err)
+type count struct {
+	n int32
+	d result
+}
 
-	// initialize map for atomic counter and metadata
-	cidrs := make(map[string]*asnData)
+func (c *count) add() {
+	atomic.AddInt32(&c.n, 1)
+}
 
-	// initialize channels
-	ipChan := make(chan string)
-	outChan := make(chan []string)
+func (c *count) get() int {
+	return int(atomic.LoadInt32(&c.n))
+}
 
-	var outWG sync.WaitGroup
-	outWG.Add(1)
-	go output(&outWG, outChan)
-
-	// TODO move sort to separate stage of pipeline
-	// TODO fan out heavy-load processing with multiple workers
-	var ipWG sync.WaitGroup
-	ipWG.Add(1)
+func lookup(m *netMap, i <-chan string, done <-chan interface{}) <-chan result {
+	c := make(chan result)
 	go func() {
-		for ipStr := range ipChan {
-			ip, err := netaddr.ParseIP(ipStr)
-			// Skip if invalid IP
+		defer close(c)
+		for ip := range i {
+			ip, err := netaddr.ParseIP(ip)
 			if err != nil {
-				continue
+				continue // skip invalid IP
 			}
-
-			// lookup CIDR and ASN number for this IP
-			cidr, asn, err := m.ipCIDR(&ip)
+			cidr, asn, err := m.ip2ASNCIDR(&ip)
 			if err != nil {
-				continue
+				continue // skip invalid
 			}
 
-			// increment counter if previously parsed and skip rest of metadata lookup & assignment operations
-			if counter, ok := cidrs[cidr]; ok {
-				counter.addCount()
-				continue
+			res := result{cidr: cidr, asn: asn, err: err}
+			select {
+			case <-done:
+				return
+			case c <- res:
 			}
-
-			// add new map entry for CIDR
-			cidrs[cidr] = &asnData{
-				asn:  asn,
-				desc: m.ASName(asn),
-			}
-			// utilize atomic counter
-			cidrs[cidr].addCount()
 		}
-
-		// sort descending by CIDR counts
-		p := make(CIDRCountsList, len(cidrs))
-		i := 0
-		for cidr, data := range cidrs {
-			p[i] = CIDRCounts{cidr, data.n}
-			i++
-		}
-		sort.Sort(sort.Reverse(p))
-		for _, k := range p {
-			outChan <- []string{fmt.Sprintf("AS%d", cidrs[k.Key].asn), cidrs[k.Key].desc, k.Key, strconv.Itoa(cidrs[k.Key].getCount())}
-		}
-
-		ipWG.Done()
 	}()
+	return c
+}
 
-	go func() {
-		ipWG.Wait()
-		close(outChan)
-	}()
+// counter merges channels receiving results from lookup workers
+func counter(c chan<- count, done <-chan interface{}, ics ...<-chan result) {
+	var wg sync.WaitGroup
+	seen := make(map[string]*count) // map of unique CIDRs & counts
+	var sm sync.RWMutex             // seen mutex
 
-	// read list of IPs from stdin
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		ipStr := sc.Text()
-		ipChan <- ipStr
+	wg.Add(len(ics))
+	multiplex := func(ic <-chan result) {
+		defer wg.Done()
+		for i := range ic {
+			select {
+			case <-done:
+				return
+			default:
+				sm.Lock()
+				counter, found := seen[i.cidr]
+				sm.Unlock()
+				if found {
+					counter.add()
+					continue
+				}
+
+				sm.Lock()
+				seen[i.cidr] = &count{d: i}
+				seen[i.cidr].add()
+				sm.Unlock()
+			}
+		}
 	}
-	close(ipChan)
 
-	outWG.Wait()
+	for _, ic := range ics {
+		go multiplex(ic)
+	}
+
+	go func() {
+		wg.Wait() // wait for merge multiplexing complete
+		for _, v := range seen {
+			select {
+			case <-done:
+				return
+			case c <- *v: // send completed count struct
+			}
+		}
+		close(c)
+	}()
+}
+
+func main() {
+	runtime.GOMAXPROCS(cpu)
+
+	done := make(chan interface{})
+	defer close(done)
+
+	ips := make(chan string)
+	go inGen(ips, done)
+
+	var nm netMap
+	if err := nm.new(); err != nil {
+		log.Fatal(err)
+	}
+
+	// fan out CIDR lookups to workers
+	cidrs := make([]<-chan result, cpu)
+	for i := 0; i < cpu; i++ {
+		cidrs[i] = lookup(&nm, ips, done)
+	}
+
+	counts := make(chan count)
+	// fan in CIDR results to counter
+	go counter(counts, done, cidrs...)
+
+	// TODO next stage: sorter
+
+	w := csv.NewWriter(os.Stdout)
+	for v := range counts {
+		o := []string{fmt.Sprintf("AS%d", v.d.asn), nm.ASName(v.d.asn), v.d.cidr, strconv.Itoa(v.get())}
+		if err := w.Write(o); err != nil {
+			log.Fatal(err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		log.Fatal(err)
+	}
 }
